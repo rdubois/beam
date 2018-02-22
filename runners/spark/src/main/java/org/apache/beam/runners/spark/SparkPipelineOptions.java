@@ -101,4 +101,12 @@ public interface SparkPipelineOptions
   boolean getUsesProvidedSparkContext();
   void setUsesProvidedSparkContext(boolean value);
 
+  @Description("The number of records to read from the source. This PipelineOption default (-1) "
+    + "will end-up to not limit the number of records.")
+  @Default.Long(-1)
+  Long getLimit();
+  void setLimit(Long value);
+
+
+
 }

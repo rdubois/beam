@@ -27,11 +27,14 @@ import com.google.common.base.Optional;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.Map;
 import org.apache.beam.runners.core.SystemReduceFn;
 import org.apache.beam.runners.core.metrics.MetricsContainerStepMap;
+import org.apache.beam.runners.spark.SparkPipelineOptions;
 import org.apache.beam.runners.spark.aggregators.AggregatorsAccumulator;
 import org.apache.beam.runners.spark.aggregators.NamedAggregators;
 import org.apache.beam.runners.spark.coders.CoderHelpers;
@@ -69,8 +72,10 @@ import org.apache.spark.Accumulator;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.api.java.function.FlatMapFunction;
 import org.apache.spark.api.java.function.Function;
 import org.apache.spark.storage.StorageLevel;
+import scala.collection.immutable.List;
 
 /**
  * Supports translation between a Beam transform, and Spark's operations on RDDs.
@@ -460,12 +465,16 @@ public final class TransformTranslator {
       @Override
       public void evaluate(Read.Bounded<T> transform, EvaluationContext context) {
         String stepName = context.getCurrentTransform().getFullName();
+        Long limit = ((SparkPipelineOptions) context.getOptions()).getLimit();
         final JavaSparkContext jsc = context.getSparkContext();
         // create an RDD from a BoundedSource.
         JavaRDD<WindowedValue<T>> input =
             new SourceRDD.Bounded<>(
                     jsc.sc(), transform.getSource(), context.getSerializableOptions(), stepName)
                 .toJavaRDD();
+        if (limit != -1) {
+          input = limitProcessedRecordsPerPartition(input, limit);
+        }
         // cache to avoid re-evaluation of the source by Spark's lazy DAG evaluation.
         context.putDataset(transform, new BoundedDataset<>(input), true);
       }
@@ -475,6 +484,24 @@ public final class TransformTranslator {
         return "sparkContext.<readFrom(<source>)>()";
       }
     };
+  }
+
+  private static <T> JavaRDD<WindowedValue<T>>
+  limitProcessedRecordsPerPartition(JavaRDD<WindowedValue<T>> input, final Long globalLimit) {
+    final int numPartitions = input.getNumPartitions();
+    return input.flatMap(new FlatMapFunction<WindowedValue<T>, WindowedValue<T>>() {
+
+      private Long counter = 0L;
+
+      @Override
+      public Iterable<WindowedValue<T>> call(WindowedValue<T> in) {
+        java.util.List<WindowedValue<T>> list = new ArrayList<>();
+        if (counter++ < Math.round(globalLimit / numPartitions)) {
+          list.add(in);
+        }
+        return list;
+      }
+    });
   }
 
   private static <T, W extends BoundedWindow> TransformEvaluator<Window.Assign<T>> window() {
